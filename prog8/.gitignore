@@ -1,0 +1,5 @@
+/target
+# Ephemeral test environment and logs
+test_env/
+*.log
+*.md5

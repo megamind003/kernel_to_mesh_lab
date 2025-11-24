@@ -1,0 +1,9 @@
+langchain
+langchain-community
+langchain-chroma
+chromadb
+ollama
+pandas
+rank_bm25
+networkx
+sentence-transformers
