@@ -54,7 +54,8 @@ static int ghost_getattr(const char *path, struct stat *stbuf) {
   const char *name = path + 1;
   uint64_t ino;
 
-  if (fs_lookup(&ctx->fs, ctx->fs.sb.root_inode, name, &ino) != 0) {
+  if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode, name,
+                &ino) != 0) {
     return -ENOENT;
   }
 
@@ -81,9 +82,16 @@ static int ghost_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   (void)fi;
 
   GhostFSContext *ctx = get_context();
+  const char *name = path + 1; // Skip leading /
+  uint64_t ino;
 
-  if (strcmp(path, "/") != 0) {
-    return -ENOENT;
+  if (strcmp(path, "/") == 0) {
+    ino = ctx->fs.sb.root_inode;
+  } else {
+    if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode,
+                  name, &ino) != 0) {
+      return -ENOENT;
+    }
   }
 
   filler(buf, ".", NULL, 0);
@@ -92,13 +100,17 @@ static int ghost_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
   DirEntry *entries;
   size_t count;
 
-  if (fs_read_dir(&ctx->fs, ctx->fs.sb.root_inode, &entries, &count) == 0) {
-    for (size_t i = 0; i < count; i++) {
-      filler(buf, entries[i].name, NULL, 0);
-    }
-    if (entries)
-      free(entries);
+  if (fs_read_dir(&ctx->fs, &ctx->pool, &ctx->crypto, ino, &entries, &count) !=
+      0) {
+    return -EIO;
   }
+
+  for (size_t i = 0; i < count; i++) {
+    filler(buf, entries[i].name, NULL, 0);
+  }
+
+  if (entries)
+    free(entries);
 
   return 0;
 }
@@ -108,7 +120,8 @@ static int ghost_open(const char *path, struct fuse_file_info *fi) {
   const char *name = path + 1;
   uint64_t ino;
 
-  if (fs_lookup(&ctx->fs, ctx->fs.sb.root_inode, name, &ino) != 0) {
+  if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode, name,
+                &ino) != 0) {
     return -ENOENT;
   }
 
@@ -129,7 +142,8 @@ static int ghost_read(const char *path, char *buf, size_t size, off_t offset,
   const char *name = path + 1;
   uint64_t ino;
 
-  if (fs_lookup(&ctx->fs, ctx->fs.sb.root_inode, name, &ino) != 0) {
+  if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode, name,
+                &ino) != 0) {
     return -ENOENT;
   }
 
@@ -209,7 +223,8 @@ static int ghost_write(const char *path, const char *buf, size_t size,
   const char *name = path + 1;
   uint64_t ino;
 
-  if (fs_lookup(&ctx->fs, ctx->fs.sb.root_inode, name, &ino) != 0) {
+  if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode, name,
+                &ino) != 0) {
     return -ENOENT;
   }
 
@@ -335,9 +350,14 @@ static int ghost_create(const char *path, mode_t mode,
   GhostFSContext *ctx = get_context();
   const char *name = path + 1;
 
+  fprintf(stderr, "[DEBUG ghost_create] Creating file: %s\n", name);
+
   uint64_t ino = fs_alloc_inode(&ctx->fs);
-  if (ino == 0)
+  if (ino == 0) {
+    fprintf(stderr, "[DEBUG ghost_create] Failed to allocate inode\n");
     return -ENOSPC;
+  }
+  fprintf(stderr, "[DEBUG ghost_create] Allocated inode: %lu\n", ino);
 
   Inode *inode = fs_get_inode(&ctx->fs, ino);
   inode->mode = mode | S_IFREG;
@@ -347,13 +367,20 @@ static int ghost_create(const char *path, mode_t mode,
   inode->atime = inode->mtime = inode->ctime = time(NULL);
   inode->nlink = 1;
 
-  if (fs_add_dir_entry(&ctx->fs, ctx->fs.sb.root_inode, name, ino, DT_REG) !=
-      0) {
+  fprintf(stderr, "[DEBUG ghost_create] Adding directory entry...\n");
+
+  if (fs_add_dir_entry(&ctx->fs, &ctx->pool, &ctx->crypto,
+                       ctx->fs.sb.root_inode, name, ino, DT_REG) != 0) {
+    fprintf(stderr, "[DEBUG ghost_create] Failed to add directory entry\n");
     fs_free_inode(&ctx->fs, ino);
     return -EIO;
   }
 
+  fprintf(stderr, "[DEBUG ghost_create] Syncing filesystem...\n");
+
   fs_sync(&ctx->fs, &ctx->pool);
+
+  fprintf(stderr, "[DEBUG ghost_create] File created successfully\n");
   return 0;
 }
 
@@ -362,7 +389,8 @@ static int ghost_unlink(const char *path) {
   const char *name = path + 1;
   uint64_t ino;
 
-  if (fs_lookup(&ctx->fs, ctx->fs.sb.root_inode, name, &ino) != 0) {
+  if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode, name,
+                &ino) != 0) {
     return -ENOENT;
   }
 
@@ -374,9 +402,51 @@ static int ghost_unlink(const char *path) {
     fs_free_block(&ctx->fs, inode->block_pointers[i]);
   }
 
-  fs_remove_dir_entry(&ctx->fs, ctx->fs.sb.root_inode, name);
+  fs_remove_dir_entry(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode,
+                      name);
   fs_free_inode(&ctx->fs, ino);
   fs_sync(&ctx->fs, &ctx->pool);
+
+  return 0;
+}
+
+static int ghost_mknod(const char *path, mode_t mode, dev_t dev) {
+  (void)dev;
+
+  fprintf(stderr, "[DEBUG ghost_mknod] Called for: %s, mode: %o\n", path, mode);
+
+  // For regular files, delegate to create
+  if (S_ISREG(mode)) {
+    return ghost_create(path, mode, NULL);
+  }
+
+  // We don't support other node types
+  return -ENOTSUP;
+}
+
+static int ghost_chmod(const char *path, mode_t mode) {
+  GhostFSContext *ctx = get_context();
+
+  if (strcmp(path, "/") == 0) {
+    Inode *root = fs_get_inode(&ctx->fs, ctx->fs.sb.root_inode);
+    root->mode = (root->mode & S_IFMT) | (mode & 0777);
+    return 0;
+  }
+
+  const char *name = path + 1;
+  uint64_t ino;
+
+  if (fs_lookup(&ctx->fs, &ctx->pool, &ctx->crypto, ctx->fs.sb.root_inode, name,
+                &ino) != 0) {
+    return -ENOENT;
+  }
+
+  Inode *inode = fs_get_inode(&ctx->fs, ino);
+  if (!inode)
+    return -ENOENT;
+
+  inode->mode = (inode->mode & S_IFMT) | (mode & 0777);
+  inode->ctime = time(NULL);
 
   return 0;
 }
@@ -409,6 +479,8 @@ static struct fuse_operations ghost_ops = {
     .read = ghost_read,
     .write = ghost_write,
     .create = ghost_create,
+    .mknod = ghost_mknod,
+    .chmod = ghost_chmod,
     .unlink = ghost_unlink,
     .init = ghost_init,
     .destroy = ghost_destroy,
@@ -434,7 +506,44 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  ctx->password = strdup("ghostfs_default_password");
+  // Parse password from arguments or environment
+  const char *env_pass = getenv("GHOSTFS_PASSWORD");
+  if (env_pass) {
+    ctx->password = strdup(env_pass);
+  } else {
+    // Check for -o password=... in args
+    for (int i = 3; i < argc; i++) {
+      if (strncmp(argv[i], "-o", 2) == 0) {
+        char *opts = strdup(argv[i] + 2);
+        if (strlen(opts) == 0 && i + 1 < argc) {
+          free(opts);
+          opts = strdup(argv[i + 1]);
+          i++; // Skip the next argument as it was consumed
+        }
+
+        char *token = strtok(opts, ",");
+        while (token) {
+          if (strncmp(token, "password=", 9) == 0) {
+            ctx->password = strdup(token + 9);
+            break;
+          }
+          token = strtok(NULL, ",");
+        }
+        free(opts);
+        if (ctx->password)
+          break;
+      } else if (strncmp(argv[i], "password=", 9) == 0) {
+        ctx->password = strdup(argv[i] + 9);
+        break;
+      }
+    }
+  }
+
+  if (!ctx->password) {
+    ctx->password = strdup("ghostfs_default_password");
+    printf("Warning: Using default password. Set GHOSTFS_PASSWORD env var or "
+           "use -o password=...\n");
+  }
 
   printf("Initializing crypto...\n");
   if (crypto_init(&ctx->crypto, ctx->password) != 0) {
@@ -456,12 +565,39 @@ int main(int argc, char *argv[]) {
   printf("Mounting GhostFS at: %s\n", argv[2]);
 
   char *fuse_argv[argc];
-  fuse_argv[0] = argv[0];
-  fuse_argv[1] = argv[2];
+  int fuse_argc = 0;
+  fuse_argv[fuse_argc++] = argv[0];
+  fuse_argv[fuse_argc++] = argv[2];
+
   for (int i = 3; i < argc; i++) {
-    fuse_argv[i - 1] = argv[i];
+    // Filter out password option to avoid FUSE error
+    if (strncmp(argv[i], "password=", 9) != 0 &&
+        (strncmp(argv[i], "-o", 2) != 0 ||
+         (i + 1 < argc && strncmp(argv[i + 1], "password=", 9) != 0 &&
+          strstr(argv[i + 1], "password=") == NULL))) {
+      fuse_argv[fuse_argc++] = argv[i];
+    } else if (strncmp(argv[i], "-o", 2) == 0 && i + 1 < argc &&
+               strstr(argv[i + 1], "password=") != NULL) {
+      // If -o is followed by password=, skip both
+      i++;
+    } else if (strncmp(argv[i], "-o", 2) == 0) {
+      // If -o contains password= within the same arg
+      char *opts_copy = strdup(argv[i] + 2);
+      char *token = strtok(opts_copy, ",");
+      int found_password_in_opts = 0;
+      while (token) {
+        if (strncmp(token, "password=", 9) == 0) {
+          found_password_in_opts = 1;
+          break;
+        }
+        token = strtok(NULL, ",");
+      }
+      free(opts_copy);
+      if (!found_password_in_opts) {
+        fuse_argv[fuse_argc++] = argv[i];
+      }
+    }
   }
-  int fuse_argc = argc - 1;
 
   int ret = fuse_main(fuse_argc, fuse_argv, &ghost_ops, ctx);
 

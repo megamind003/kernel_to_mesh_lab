@@ -223,16 +223,15 @@ int carrier_write_block(CarrierPool *pool, uint64_t block_num,
   for (size_t i = 0; i < pool->count && bits_written < needed_bits; i++) {
     Carrier *c = &pool->carriers[i];
 
-    if (offset_bits >= c->capacity_bits) {
-      offset_bits -= c->capacity_bits;
+    if (offset_bits >= c->used_bits) {
+      offset_bits -= c->used_bits;
       continue;
     }
 
     size_t local_offset = offset_bits;
-    size_t to_write =
-        (needed_bits - bits_written < c->capacity_bits - local_offset)
-            ? (needed_bits - bits_written)
-            : (c->capacity_bits - local_offset);
+    size_t to_write = (needed_bits - bits_written < c->used_bits - local_offset)
+                          ? (needed_bits - bits_written)
+                          : (c->used_bits - local_offset);
 
     pthread_mutex_unlock(&pool->lock);
 
@@ -247,10 +246,6 @@ int carrier_write_block(CarrierPool *pool, uint64_t block_num,
     offset_bits = 0;
 
     pthread_mutex_lock(&pool->lock);
-
-    if (c->used_bits < local_offset + to_write) {
-      c->used_bits = local_offset + to_write;
-    }
   }
 
   pthread_mutex_unlock(&pool->lock);

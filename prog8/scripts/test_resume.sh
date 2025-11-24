@@ -28,17 +28,18 @@ SENDER_PID=$!
 # Wait a bit to let it transfer ~40% (simulated by time or size check)
 # Since we don't know exact speed, we'll wait for the file to grow
 echo "Waiting for transfer to progress..."
-TARGET_SIZE=$(stat -c%s test_env/data/large_file.mov)
+TARGET_SIZE=$(stat -L -c%s test_env/data/large_file.mov)
 CUTOFF_SIZE=$((TARGET_SIZE * 40 / 100))
+echo "Target Size: $TARGET_SIZE"
+echo "Cutoff Size: $CUTOFF_SIZE"
 
 while true; do
-    if [ -f "test_env/peer1/storage/large_file.mov" ]; then
-        CURRENT_SIZE=$(stat -c%s test_env/peer1/storage/large_file.mov)
-        if [ $CURRENT_SIZE -gt $CUTOFF_SIZE ]; then
-            echo "Reached 40% ($CURRENT_SIZE bytes). Killing sender..."
-            kill -9 $SENDER_PID
-            break
-        fi
+    CURRENT_SIZE=$(du -sb test_env/peer1/storage | awk '{print $1}')
+    # echo "Current size: $CURRENT_SIZE / $CUTOFF_SIZE"
+    if [ $CURRENT_SIZE -gt $CUTOFF_SIZE ]; then
+        echo "Reached 40% ($CURRENT_SIZE bytes). Killing sender..."
+        kill -9 $SENDER_PID
+        break
     fi
     sleep 1
 done

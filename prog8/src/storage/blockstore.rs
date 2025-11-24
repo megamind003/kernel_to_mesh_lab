@@ -1,6 +1,5 @@
 use anyhow::Result;
 use bytes::Bytes;
-use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +10,6 @@ use super::merkle::ContentHash;
 
 pub struct BlockStore {
     base_path: PathBuf,
-    cache: Arc<DashMap<ContentHash, Arc<Bytes>>>,
 }
 
 impl BlockStore {
@@ -21,7 +19,6 @@ impl BlockStore {
 
         Ok(BlockStore {
             base_path,
-            cache: Arc::new(DashMap::new()),
         })
     }
 
@@ -36,15 +33,15 @@ impl BlockStore {
         file.write_all(&data)?;
         file.sync_all()?;
 
-        self.cache.insert(hash.clone(), Arc::new(data));
+        // self.cache.insert(hash.clone(), Arc::new(data)); // Removed caching
 
         Ok(())
     }
 
     pub fn get(&self, hash: &ContentHash) -> Result<Option<Bytes>> {
-        if let Some(cached) = self.cache.get(hash) {
-            return Ok(Some((**cached).clone()));
-        }
+        // if let Some(cached) = self.cache.get(hash) {
+        //     return Ok(Some((**cached).clone()));
+        // }
 
         let path = self.hash_to_path(hash);
         
@@ -55,17 +52,12 @@ impl BlockStore {
         let data = fs::read(&path)?;
         let bytes = Bytes::from(data);
         
-        self.cache.insert(hash.clone(), Arc::new(bytes.clone()));
+        // self.cache.insert(hash.clone(), Arc::new(bytes.clone()));
 
         Ok(Some(bytes))
     }
 
     pub fn has(&self, hash: &ContentHash) -> bool {
-        if self.cache.contains_key(hash) {
-            println!("BlockStore::has({}) -> true (cache)", hash);
-            return true;
-        }
-
         let exists = self.hash_to_path(hash).exists();
         if exists {
             println!("BlockStore::has({}) -> true (disk: {:?})", hash, self.hash_to_path(hash));

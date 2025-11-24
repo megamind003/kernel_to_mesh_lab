@@ -1,6 +1,10 @@
 use anyhow::Result;
 use bytes::Bytes;
 use std::io::Read;
+use std::path::Path;
+use std::fs::File;
+use std::io::BufReader;
+use super::merkle::ContentHash;
 
 const WINDOW_SIZE: usize = 64;
 const MIN_CHUNK_SIZE: usize = 16 * 1024;
@@ -66,23 +70,30 @@ impl RabinChunker {
         chunks
     }
 
+
+
     pub fn chunk_reader<R: Read>(mut reader: R) -> Result<Vec<Bytes>> {
         let mut chunker = Self::new();
         let mut chunks = Vec::new();
-        let mut buffer = Vec::new();
+        let mut buffer = [0u8; 8192]; // 8KB buffer
         let mut chunk_buffer = Vec::new();
 
-        reader.read_to_end(&mut buffer)?;
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
 
-        for (pos, &byte) in buffer.iter().enumerate() {
-            chunk_buffer.push(byte);
-            
-            if chunker.push_byte(byte) && chunk_buffer.len() >= MIN_CHUNK_SIZE {
-                chunks.push(Bytes::from(chunk_buffer.clone()));
-                chunk_buffer.clear();
-            } else if chunk_buffer.len() >= MAX_CHUNK_SIZE {
-                chunks.push(Bytes::from(chunk_buffer.clone()));
-                chunk_buffer.clear();
+            for &byte in &buffer[..n] {
+                chunk_buffer.push(byte);
+                
+                if chunker.push_byte(byte) && chunk_buffer.len() >= MIN_CHUNK_SIZE {
+                    chunks.push(Bytes::from(chunk_buffer.clone()));
+                    chunk_buffer.clear();
+                } else if chunk_buffer.len() >= MAX_CHUNK_SIZE {
+                    chunks.push(Bytes::from(chunk_buffer.clone()));
+                    chunk_buffer.clear();
+                }
             }
         }
 
@@ -91,6 +102,50 @@ impl RabinChunker {
         }
 
         Ok(chunks)
+    }
+
+    pub fn chunk_file_metadata(path: &Path) -> Result<Vec<(ContentHash, u64, u64)>> {
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut chunker = Self::new();
+        let mut metadata = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let mut chunk_buffer = Vec::new();
+        let mut current_offset = 0u64;
+
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+
+            for &byte in &buffer[..n] {
+                chunk_buffer.push(byte);
+                
+                let is_boundary = chunker.push_byte(byte);
+                let len = chunk_buffer.len();
+
+                if (is_boundary && len >= MIN_CHUNK_SIZE) || len >= MAX_CHUNK_SIZE {
+                    let hash = ContentHash::from_bytes(&chunk_buffer);
+                    metadata.push((hash, current_offset, len as u64));
+                    current_offset += len as u64;
+                    chunk_buffer.clear();
+                    // Reset chunker window? No, Rabin fingerprinting rolls over.
+                    // But wait, if we clear chunk_buffer, we are starting a new chunk.
+                    // The window should continue rolling? Yes, usually.
+                    // But standard implementation might reset?
+                    // The original code didn't reset the chunker state.
+                    // "chunker" struct keeps state.
+                }
+            }
+        }
+
+        if !chunk_buffer.is_empty() {
+            let hash = ContentHash::from_bytes(&chunk_buffer);
+            metadata.push((hash, current_offset, chunk_buffer.len() as u64));
+        }
+
+        Ok(metadata)
     }
 
     fn push_byte(&mut self, byte: u8) -> bool {

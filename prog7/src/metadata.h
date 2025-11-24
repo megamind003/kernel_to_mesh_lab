@@ -2,6 +2,7 @@
 #define METADATA_H
 
 #include "carrier.h"
+#include "crypto.h"
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -67,12 +68,15 @@ Inode *fs_get_inode(Filesystem *fs, uint64_t ino);
 uint64_t fs_alloc_block(Filesystem *fs);
 void fs_free_block(Filesystem *fs, uint64_t block);
 
-int fs_read_dir(Filesystem *fs, uint64_t parent_ino, DirEntry **entries,
-                size_t *count);
-int fs_add_dir_entry(Filesystem *fs, uint64_t parent_ino, const char *name,
-                     uint64_t child_ino, uint8_t type);
-int fs_remove_dir_entry(Filesystem *fs, uint64_t parent_ino, const char *name);
-int fs_lookup(Filesystem *fs, uint64_t parent_ino, const char *name,
-              uint64_t *ino);
+int fs_read_dir(Filesystem *fs, CarrierPool *pool, CryptoContext *crypto,
+                uint64_t parent_ino, DirEntry **entries, size_t *count);
+int fs_add_dir_entry(Filesystem *fs, CarrierPool *pool, CryptoContext *crypto,
+                     uint64_t parent_ino, const char *name, uint64_t child_ino,
+                     uint8_t type);
+int fs_remove_dir_entry(Filesystem *fs, CarrierPool *pool,
+                        CryptoContext *crypto, uint64_t parent_ino,
+                        const char *name);
+int fs_lookup(Filesystem *fs, CarrierPool *pool, CryptoContext *crypto,
+              uint64_t parent_ino, const char *name, uint64_t *ino);
 
 #endif

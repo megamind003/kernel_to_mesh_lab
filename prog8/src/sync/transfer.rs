@@ -126,6 +126,19 @@ impl TransferManager {
 
         Ok(Bytes::from(file_data))
     }
+
+    pub async fn reconstruct_to_file(&self, state: &TransferState, output_path: &std::path::Path) -> Result<()> {
+        let mut file = tokio::fs::File::create(output_path).await?;
+        
+        for chunk_hash in &state.chunk_hashes {
+            let chunk = self.block_store.get(chunk_hash)?
+                .ok_or_else(|| anyhow::anyhow!("Missing chunk"))?;
+            file.write_all(&chunk).await?;
+        }
+        
+        file.flush().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

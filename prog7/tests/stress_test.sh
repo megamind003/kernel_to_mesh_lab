@@ -15,12 +15,27 @@ PASSWORD="testpass123"
 echo "=== GhostFS Stress Test: Invisible Ink Protocol ==="
 echo
 
+cleanup() {
+    echo "Cleaning up..."
+    if mountpoint -q "$MOUNT_POINT"; then
+        fusermount -u "$MOUNT_POINT" || umount "$MOUNT_POINT"
+    fi
+    pkill -f "ghostfs" || true
+}
+trap cleanup EXIT
+
 echo "[1/8] Cleaning previous test data..."
 rm -rf "$TEST_CARRIERS_DIR" "$MOUNT_POINT"
 mkdir -p "$TEST_CARRIERS_DIR" "$MOUNT_POINT"
 
 echo "[2/8] Copying PNG carriers from data_hardcore..."
 PNG_COUNT=0
+# Ensure directory exists
+if [ ! -d "$DATA_DIR/archive/all_images/images" ]; then
+    echo "ERROR: Source images directory not found!"
+    exit 1
+fi
+
 for png in "$DATA_DIR/archive/all_images/images"/*.png; do
   if [ $PNG_COUNT -ge 100 ]; then
     break
@@ -31,17 +46,30 @@ done
 echo "Copied $PNG_COUNT PNG carrier files"
 
 echo "[3/8] Computing original alpine MD5..."
+if [ ! -f "$ALPINE_FILE" ]; then
+    echo "ERROR: Alpine file not found at $ALPINE_FILE"
+    exit 1
+fi
 ORIGINAL_MD5=$(md5sum "$ALPINE_FILE" | awk '{print $1}')
 echo "Original MD5: $ORIGINAL_MD5"
 
 echo "[4/8] Mounting GhostFS..."
-timeout 10 "$GHOSTFS_BIN" "$TEST_CARRIERS_DIR" "$MOUNT_POINT" -f &
+# Run in background, but don't use timeout here as we need it to stay up
+"$GHOSTFS_BIN" "$TEST_CARRIERS_DIR" "$MOUNT_POINT" -o password="$PASSWORD" &
 FUSE_PID=$!
-sleep 2
+
+# Wait for mount
+echo "Waiting for mount..."
+for i in {1..10}; do
+    if mountpoint -q "$MOUNT_POINT"; then
+        echo "Mounted successfully."
+        break
+    fi
+    sleep 1
+done
 
 if ! mountpoint -q "$MOUNT_POINT"; then
   echo "ERROR: Failed to mount GhostFS"
-  kill $FUSE_PID 2>/dev/null || true
   exit 1
 fi
 
@@ -53,18 +81,30 @@ INJECTED_SIZE=$(stat -c%s "$MOUNT_POINT/alpine.tar.gz")
 echo "Injected file size: $INJECTED_SIZE bytes"
 
 echo "[6/8] Unmounting filesystem..."
-fusermount -u "$MOUNT_POINT" || umount "$MOUNT_POINT"
+fusermount -u "$MOUNT_POINT"
 wait $FUSE_PID 2>/dev/null || true
-sleep 1
+sleep 2
 
 echo "[7/8] Remounting and extracting file..."
-"$PROJECT_ROOT/bin/ghostfs" "$TEST_CARRIERS_DIR/test" "$MOUNT_POINT" -o password=testpass123 &
+"$GHOSTFS_BIN" "$TEST_CARRIERS_DIR" "$MOUNT_POINT" -o password="$PASSWORD" &
 FUSE_PID=$!
-sleep 2
+
+# Wait for mount
+for i in {1..10}; do
+    if mountpoint -q "$MOUNT_POINT"; then
+        break
+    fi
+    sleep 1
+done
+
+if ! mountpoint -q "$MOUNT_POINT"; then
+  echo "ERROR: Failed to remount GhostFS"
+  exit 1
+fi
 
 cp "$MOUNT_POINT/alpine.tar.gz" "$SCRIPT_DIR/extracted_alpine.tar.gz"
 
-fusermount -u "$MOUNT_POINT" || umount "$MOUNT_POINT"
+fusermount -u "$MOUNT_POINT"
 wait $FUSE_PID 2>/dev/null || true
 
 echo "[8/8] Verifying MD5 integrity..."
@@ -76,6 +116,7 @@ if [ "$ORIGINAL_MD5" == "$EXTRACTED_MD5" ]; then
   echo "SUCCESS: MD5 hashes match - data integrity verified"
   echo "The 3.5MB alpine rootfs was successfully hidden in PNG images"
   echo "Carrier images remain visually unchanged"
+  # Keep exit trap from unmounting again (it's already unmounted)
   exit 0
 else
   echo

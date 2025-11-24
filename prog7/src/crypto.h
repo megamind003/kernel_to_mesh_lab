@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KEY_SIZE 32
+#define KEY_SIZE 64
 #define SALT_SIZE 16
 #define IV_SIZE 16
 

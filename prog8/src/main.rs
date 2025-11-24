@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::io::Write;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt};
+use std::io::{Write, SeekFrom};
 use tracing::Level;
 use bytes::Bytes;
 use std::time::Instant;
@@ -225,14 +225,12 @@ async fn handle_connection(conn: quinn::Connection, storage_path: PathBuf) -> Re
                                         Ok(true) => {
                                             tracing::info!("File transfer complete: {:?}", file_name_opt);
                                             if let Some(state) = transfer_mgr.get_state(fh) {
-                                                if let Ok(file_bytes) = transfer_mgr.reconstruct_file(&state) {
-                                                    if let Some(ref name) = file_name_opt {
-                                                        let path = storage_path.join(name);
-                                                        if let Err(e) = tokio::fs::write(&path, file_bytes).await {
-                                                            tracing::error!("Failed to save file: {}", e);
-                                                        } else {
-                                                            tracing::info!("Saved file to {:?}", path);
-                                                        }
+                                                if let Some(ref name) = file_name_opt {
+                                                    let path = storage_path.join(name);
+                                                    if let Err(e) = transfer_mgr.reconstruct_to_file(&state, &path).await {
+                                                        tracing::error!("Failed to save file: {}", e);
+                                                    } else {
+                                                        tracing::info!("Saved file to {:?}", path);
                                                     }
                                                 }
                                             }
@@ -262,7 +260,7 @@ async fn handle_connection(conn: quinn::Connection, storage_path: PathBuf) -> Re
     Ok(())
 }
 
-async fn send_file(file_path: PathBuf, peer_addr: SocketAddr, storage_path: PathBuf) -> Result<()> {
+async fn send_file(file_path: PathBuf, peer_addr: SocketAddr, _storage_path: PathBuf) -> Result<()> {
     let start_time = Instant::now();
     
     tracing::info!("Sending file: {:?} to {}", file_path, peer_addr);
@@ -270,21 +268,16 @@ async fn send_file(file_path: PathBuf, peer_addr: SocketAddr, storage_path: Path
     let transport = QuicTransport::new("0.0.0.0:0".parse()?).await?;
     let conn = transport.connect(peer_addr).await?;
 
-    let file_data = tokio::fs::read(&file_path).await?;
-    let file_size = file_data.len();
+    let file_size = tokio::fs::metadata(&file_path).await?.len();
     tracing::info!("File size: {} bytes", file_size);
 
-    let chunks = RabinChunker::chunk_data(&file_data);
-    tracing::info!("File chunked into {} parts", chunks.len());
+    // Use chunk_file_metadata to get chunks without loading file
+    let chunks_metadata = RabinChunker::chunk_file_metadata(&file_path)?;
+    tracing::info!("File chunked into {} parts", chunks_metadata.len());
 
-    let block_store = Arc::new(BlockStore::new(&storage_path)?);
-    let mut chunk_hashes = Vec::new();
-
-    for chunk in &chunks {
-        let hash = ContentHash::from_bytes(chunk);
-        block_store.put(&hash, chunk.clone())?;
-        chunk_hashes.push(hash);
-    }
+    // We don't put chunks into BlockStore here to save time/space, we read from file directly.
+    // But we need the hashes.
+    let chunk_hashes: Vec<ContentHash> = chunks_metadata.iter().map(|(h, _, _)| h.clone()).collect();
 
     let (mut send, mut recv) = conn.open_bi().await?;
 
@@ -320,17 +313,24 @@ async fn send_file(file_path: PathBuf, peer_addr: SocketAddr, storage_path: Path
 
     tracing::info!("Sending {} chunks", requested_chunks.len());
 
+    let mut file = tokio::fs::File::open(&file_path).await?;
+
     for chunk_idx in requested_chunks {
-        let chunk = &chunks[chunk_idx];
+        if chunk_idx >= chunks_metadata.len() { continue; }
+        let (_, offset, len) = chunks_metadata[chunk_idx];
         
         send.write_all(&[0x04]).await?;
         send.write_all(&(chunk_idx as u64).to_be_bytes()).await?;
-        send.write_all(&(chunk.len() as u64).to_be_bytes()).await?;
+        send.write_all(&(len as u64).to_be_bytes()).await?;
         
-        let prefix = if chunk.len() > 10 { &chunk[..10] } else { chunk };
-        tracing::info!("Sending chunk {} size {} prefix {}", chunk_idx, chunk.len(), hex_encode(prefix));
+        file.seek(SeekFrom::Start(offset)).await?;
+        let mut chunk_data = vec![0u8; len as usize];
+        file.read_exact(&mut chunk_data).await?;
+
+        let prefix = if chunk_data.len() > 10 { &chunk_data[..10] } else { &chunk_data };
+        tracing::info!("Sending chunk {} size {} prefix {}", chunk_idx, len, hex_encode(prefix));
         
-        send.write_all(chunk).await?;
+        send.write_all(&chunk_data).await?;
     }
 
     send.finish().await?;

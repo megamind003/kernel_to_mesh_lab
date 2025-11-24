@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.chronos.api.grpc";
+option java_outer_classname = "ChronosProto";
+
+package chronos;
+
+service ChronosService {
+  rpc ScheduleJob(ScheduleJobRequest) returns (ScheduleJobResponse);
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+}
+
+message ScheduleJobRequest {
+  int64 delay_seconds = 1;
+  string job_type = 2;
+  string payload = 3;
+  string tenant_id = 4;
+  int32 max_retries = 5;
+}
+
+message ScheduleJobResponse {
+  int64 job_id = 1;
+  string status = 2;
+  string message = 3;
+}
+
+message GetJobStatusRequest {
+  int64 job_id = 1;
+}
+
+message GetJobStatusResponse {
+  int64 job_id = 1;
+  string status = 2;
+  string result = 3;
+  string error_message = 4;
+}
+
+message CancelJobRequest {
+  int64 job_id = 1;
+}
+
+message CancelJobResponse {
+  bool success = 1;
+  string message = 2;
+}
